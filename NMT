@@ -1,0 +1,189 @@
+-- === Universal "TP to End" for rotating maps (Workspace-only, streaming-safe) ===
+
+-- CONFIG
+local FINISH_NAMES = { "finish","end","goal","exit","win" }
+local START_NAMES  = { "start","spawn","begin","entrance" }
+local MAX_WAIT_SECS = 6         -- time to wait for streamed parts
+local CHECK_INTERVAL = 0.1      -- streaming poll interval
+local MIN_MODEL_SIZE = 40       -- ignore tiny prop models (studs)
+local ABOVE_OFFSET   = 4        -- how far above target to place HRP
+
+-- SERVICES
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+-- UTIL
+local function norm(s)
+    s = tostring(s or ""):lower()
+    s = s:gsub("[%s_%-]", "") -- remove spaces/underscore/hyphen
+    return s
+end
+
+local function containsAny(name, list)
+    local n = norm(name)
+    for _,kw in ipairs(list) do
+        if n:find(norm(kw), 1, true) then return true end
+    end
+    return false
+end
+
+local function safeHRP(char)
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function bboxInfo(model)
+    local ok, cf, size = pcall(model.GetBoundingBox, model)
+    if not ok then return nil end
+    return cf, size
+end
+
+local function distanceToModelRoot(model, pos)
+    local cf, size = bboxInfo(model)
+    if not cf or not size then return math.huge end
+    return (cf.Position - pos).Magnitude, size
+end
+
+local function isLikelyMapModel(model)
+    if not model:IsA("Model") then return false end
+    local cf, size = bboxInfo(model)
+    if not cf or not size then return false end
+    -- require "big enough" to be a map, not a prop
+    return math.max(size.X, size.Y, size.Z) >= MIN_MODEL_SIZE
+end
+
+local function findCandidatesIn(descendants, nameList)
+    local results = {}
+    for _,inst in ipairs(descendants) do
+        if inst:IsA("BasePart") and containsAny(inst.Name, nameList) then
+            table.insert(results, inst)
+        elseif inst:IsA("Model") and containsAny(inst.Name, nameList) then
+            -- sometimes the container is named 'Finish'/'End'—prefer a part inside
+            local primary = inst.PrimaryPart
+            if primary then
+                table.insert(results, primary)
+            else
+                for _,sub in ipairs(inst:GetDescendants()) do
+                    if sub:IsA("BasePart") then
+                        table.insert(results, sub)
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return results
+end
+
+-- Pick the active map in Workspace by:
+-- 1) Large-ish model (not props)
+-- 2) Proximity to the player
+-- 3) Presence of start/finish-like parts (bonus points)
+local function getActiveMapModel()
+    local char = LocalPlayer.Character
+    local hrp = safeHRP(char)
+    local mePos = (hrp and hrp.Position) or Vector3.zero
+
+    local bestModel, bestScore = nil, math.huge
+
+    for _,child in ipairs(workspace:GetChildren()) do
+        if isLikelyMapModel(child) then
+            local d, size = distanceToModelRoot(child, mePos)
+            -- prefer models that actually contain start/finish-like parts
+            local hasStart = #findCandidatesIn(child:GetDescendants(), START_NAMES) > 0
+            local hasEnd   = #findCandidatesIn(child:GetDescendants(), FINISH_NAMES) > 0
+
+            -- scoring: nearer is better; if it has end/start, cut the distance heavily
+            local score = d
+            if hasEnd then score = score * 0.25 end
+            if hasStart then score = score * 0.5 end
+
+            if score < bestScore then
+                bestScore, bestModel = score, child
+            end
+        end
+    end
+
+    return bestModel
+end
+
+-- Wait for a finish-like part to appear in the chosen model (StreamingEnabled safe)
+local function waitForFinishPart(mapModel)
+    local elapsed = 0
+    while elapsed < MAX_WAIT_SECS do
+        local candidates = findCandidatesIn(mapModel:GetDescendants(), FINISH_NAMES)
+
+        -- Heuristic: prefer parts on/near the top layer to avoid void TP, then farthest from player
+        if #candidates > 0 then
+            local hrp = safeHRP(LocalPlayer.Character)
+            local mePos = (hrp and hrp.Position) or Vector3.zero
+
+            table.sort(candidates, function(a,b)
+                -- primary sort: distance (farther tends to be the end)
+                local da = (a.Position - mePos).Magnitude
+                local db = (b.Position - mePos).Magnitude
+                if math.abs(da - db) > 5 then
+                    return da > db
+                end
+                -- secondary: higher Y (many ends are elevated / at goal platforms)
+                return a.Position.Y > b.Position.Y
+            end)
+
+            return candidates[1]
+        end
+
+        task.wait(CHECK_INTERVAL)
+        elapsed += CHECK_INTERVAL
+    end
+    return nil
+end
+
+local function tpAbove(part)
+    local char = LocalPlayer.Character
+    local hrp  = safeHRP(char)
+    if not (char and hrp and part and part.CFrame) then return false end
+
+    -- place slightly above to avoid falling through or getting stuck
+    local target = part.CFrame + Vector3.new(0, ABOVE_OFFSET, 0)
+    -- clear ragdoll/fall if possible
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function()
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        end)
+    end
+    hrp.CFrame = target
+    return true
+end
+
+-- PUBLIC: call this to go to current map's finish
+local function teleportToMapEnd()
+    local mapModel = getActiveMapModel()
+    if not mapModel then
+        warn("[TP-End] No suitable map model found in Workspace.")
+        return false
+    end
+
+    local finishPart = waitForFinishPart(mapModel)
+    if not finishPart then
+        warn("[TP-End] No finish-like part found in active map within timeout.")
+        return false
+    end
+
+    return tpAbove(finishPart)
+end
+
+-- Optional: bind a key to trigger (press P)
+local UserInputService = game:GetService("UserInputService")
+UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    if inp.KeyCode == Enum.KeyCode.P then
+        teleportToMapEnd()
+    end
+end)
+
+-- You can also call teleportToMapEnd() directly after a small delay:
+-- task.delay(1, teleportToMapEnd)
