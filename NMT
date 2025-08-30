@@ -1,29 +1,82 @@
--- === Universal "TP to End" for rotating maps (Workspace-only, streaming-safe) ===
-
+-- =======================================================
 -- CONFIG
-local FINISH_NAMES = { "finish","end","goal","exit","win" }
-local START_NAMES  = { "start","spawn","begin","entrance" }
-local MAX_WAIT_SECS = 6         -- time to wait for streamed parts
-local CHECK_INTERVAL = 0.1      -- streaming poll interval
-local MIN_MODEL_SIZE = 40       -- ignore tiny prop models (studs)
-local ABOVE_OFFSET   = 4        -- how far above target to place HRP
+-- =======================================================
+local KEY_URL = "https://keysite-production.up.railway.app/public/keys.txt"
+local GET_KEY_LINK = "https://loot-link.com/s?gbTnLVac"
+local CACHE_FILE = "LazyDevs_LastKey.txt"
 
+-- =======================================================
 -- SERVICES
+-- =======================================================
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
+local TeleportService = game:GetService("TeleportService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Stats = game:FindFirstChild("Stats")
 
--- UTIL
-local function norm(s)
-    s = tostring(s or ""):lower()
-    s = s:gsub("[%s_%-]", "") -- remove spaces/underscore/hyphen
-    return s
+-- =======================================================
+-- KEY HELPERS
+-- =======================================================
+local function fetchKeys()
+    local ok, body = pcall(function() return game:HttpGet(KEY_URL, true) end)
+    if not ok or not body then return {} end
+    local keys = {}
+    for line in string.gmatch(body, "[^\r\n]+") do
+        local key = string.gsub(line, "^%s*(.-)%s*$", "%1")
+        if key ~= "" then table.insert(keys, key) end
+    end
+    return keys
 end
 
+local function isValidKey(userKey)
+    if not userKey or #userKey == 0 then return false end
+    for _, k in ipairs(fetchKeys()) do
+        if userKey == k then return true end
+    end
+    return false
+end
+
+local function saveCachedKey(key)
+    if writefile then pcall(function() writefile(CACHE_FILE, key) end) end
+end
+
+local function readCachedKey()
+    if readfile and isfile and isfile(CACHE_FILE) then
+        local ok, val = pcall(function() return readfile(CACHE_FILE) end)
+        if ok and val and #val > 0 then return val end
+    end
+    return nil
+end
+
+-- =======================================================
+-- LOAD RAYFIELD
+-- =======================================================
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+local HubWindow = Rayfield:CreateWindow({
+    Name = "Lazy Devs | No More Time Hub",
+    LoadingTitle = "Welcome Back",
+    LoadingSubtitle = "Authentication Required",
+    Theme = "Ocean",
+    ToggleUIKeybind = Enum.KeyCode.K,
+    KeySystem = false
+})
+
+local hubLoaded, validateBusy = false, false
+local AbilityManager = {
+    Player  = { SpeedBoost = 16, JumpBoostValue = 50, AirWalk = false, NoClip = false },
+    Game    = { GodMode = false, Fly = false, TrollLoop = false, HelpLoop = false }
+}
+
+-- =======================================================
+-- UNIVERSAL TELEPORT TO END LOGIC
+-- =======================================================
+local FINISH_NAMES = { "finish","end","goal","exit","win" }
+
 local function containsAny(name, list)
-    local n = norm(name)
+    local n = string.lower(name or "")
     for _,kw in ipairs(list) do
-        if n:find(norm(kw), 1, true) then return true end
+        if string.find(n, kw) then return true end
     end
     return false
 end
@@ -33,157 +86,105 @@ local function safeHRP(char)
     return char:FindFirstChild("HumanoidRootPart")
 end
 
-local function bboxInfo(model)
-    local ok, cf, size = pcall(model.GetBoundingBox, model)
-    if not ok then return nil end
-    return cf, size
-end
-
-local function distanceToModelRoot(model, pos)
-    local cf, size = bboxInfo(model)
-    if not cf or not size then return math.huge end
-    return (cf.Position - pos).Magnitude, size
-end
-
-local function isLikelyMapModel(model)
-    if not model:IsA("Model") then return false end
-    local cf, size = bboxInfo(model)
-    if not cf or not size then return false end
-    -- require "big enough" to be a map, not a prop
-    return math.max(size.X, size.Y, size.Z) >= MIN_MODEL_SIZE
-end
-
-local function findCandidatesIn(descendants, nameList)
-    local results = {}
-    for _,inst in ipairs(descendants) do
-        if inst:IsA("BasePart") and containsAny(inst.Name, nameList) then
-            table.insert(results, inst)
-        elseif inst:IsA("Model") and containsAny(inst.Name, nameList) then
-            -- sometimes the container is named 'Finish'/'End'—prefer a part inside
-            local primary = inst.PrimaryPart
-            if primary then
-                table.insert(results, primary)
-            else
-                for _,sub in ipairs(inst:GetDescendants()) do
-                    if sub:IsA("BasePart") then
-                        table.insert(results, sub)
-                        break
-                    end
-                end
-            end
+local function findFinishPart(model)
+    for _,inst in ipairs(model:GetDescendants()) do
+        if inst:IsA("BasePart") and containsAny(inst.Name, FINISH_NAMES) then
+            return inst
         end
     end
-    return results
 end
 
--- Pick the active map in Workspace by:
--- 1) Large-ish model (not props)
--- 2) Proximity to the player
--- 3) Presence of start/finish-like parts (bonus points)
 local function getActiveMapModel()
+    for _,child in ipairs(workspace:GetChildren()) do
+        if child:IsA("Model") and child:FindFirstChildWhichIsA("BasePart") then
+            local finish = findFinishPart(child)
+            if finish then return child, finish end
+        end
+    end
+end
+
+local function teleportToMapEnd()
     local char = LocalPlayer.Character
     local hrp = safeHRP(char)
-    local mePos = (hrp and hrp.Position) or Vector3.zero
+    if not hrp then return end
 
-    local bestModel, bestScore = nil, math.huge
+    local mapModel, finishPart = getActiveMapModel()
+    if finishPart then
+        hrp.CFrame = finishPart.CFrame + Vector3.new(0,4,0)
+        Rayfield:Notify({Title="TP",Content="Teleported to End",Duration=3})
+    else
+        Rayfield:Notify({Title="TP",Content="No Finish Found",Duration=3})
+    end
+end
 
-    for _,child in ipairs(workspace:GetChildren()) do
-        if isLikelyMapModel(child) then
-            local d, size = distanceToModelRoot(child, mePos)
-            -- prefer models that actually contain start/finish-like parts
-            local hasStart = #findCandidatesIn(child:GetDescendants(), START_NAMES) > 0
-            local hasEnd   = #findCandidatesIn(child:GetDescendants(), FINISH_NAMES) > 0
+-- =======================================================
+-- LOAD HUB TABS
+-- =======================================================
+local function loadHubTabs()
+    if hubLoaded then return end
+    hubLoaded = true
 
-            -- scoring: nearer is better; if it has end/start, cut the distance heavily
-            local score = d
-            if hasEnd then score = score * 0.25 end
-            if hasStart then score = score * 0.5 end
+    -- Info
+    local InfoTab = HubWindow:CreateTab("Information")
+    InfoTab:CreateLabel("Lazy Devs | No More Time Hub")
+    InfoTab:CreateLabel("Developed by Lazy Devs")
+    InfoTab:CreateLabel("Version 1.0.0")
 
-            if score < bestScore then
-                bestScore, bestModel = score, child
-            end
+    -- Player
+    local PlayerTab = HubWindow:CreateTab("Player")
+    PlayerTab:CreateSlider({
+        Name = "Speed Boost",
+        Range = {16,150},
+        Increment = 2,
+        CurrentValue = 16,
+        Callback = function(val) AbilityManager.Player.SpeedBoost = val end
+    })
+    PlayerTab:CreateSlider({
+        Name = "Jump Boost",
+        Range = {0,175},
+        Increment = 5,
+        CurrentValue = 50,
+        Callback = function(val) AbilityManager.Player.JumpBoostValue = val end
+    })
+    PlayerTab:CreateToggle({ Name = "AirWalk", CurrentValue = false, Callback = function(v) AbilityManager.Player.AirWalk = v end })
+    PlayerTab:CreateToggle({ Name = "NoClip", CurrentValue = false, Callback = function(v) AbilityManager.Player.NoClip = v end })
+
+    -- Game
+    local GameTab = HubWindow:CreateTab("Game")
+    GameTab:CreateToggle({ Name = "GodMode", CurrentValue = false, Callback = function(v) AbilityManager.Game.GodMode = v end })
+    GameTab:CreateToggle({ Name = "Fly", CurrentValue = false, Callback = function(v) AbilityManager.Game.Fly = v end })
+    GameTab:CreateToggle({ Name = "Troll Players Loop", CurrentValue = false, Callback = function(v) AbilityManager.Game.TrollLoop = v end })
+    GameTab:CreateToggle({ Name = "Help Players Loop", CurrentValue = false, Callback = function(v) AbilityManager.Game.HelpLoop = v end })
+    GameTab:CreateButton({ Name = "Teleport to End", Callback = function() teleportToMapEnd() end })
+end
+
+-- =======================================================
+-- KEY TAB
+-- =======================================================
+local KeyTab = HubWindow:CreateTab("Key")
+KeyTab:CreateSection("Validation")
+local statusLabel = KeyTab:CreateLabel("Status: idle")
+local currentKey = readCachedKey() or ""
+KeyTab:CreateInput({ Name = "Enter Key", PlaceholderText = "Paste your key...", CurrentValue = currentKey, Callback = function(text) currentKey = text end })
+KeyTab:CreateButton({
+    Name = "Validate Key",
+    Callback = function()
+        if validateBusy or hubLoaded then return end
+        validateBusy = true
+        if isValidKey(currentKey) then
+            statusLabel:Set("Status: ✅ Valid")
+            saveCachedKey(currentKey)
+            loadHubTabs()
+            KeyTab.TabFrame.Visible = false
+        else
+            statusLabel:Set("Status: ❌ Invalid")
         end
+        validateBusy = false
     end
+})
 
-    return bestModel
+if currentKey ~= "" and isValidKey(currentKey) then
+    statusLabel:Set("Status: Cached key valid")
+    loadHubTabs()
+    KeyTab.TabFrame.Visible = false
 end
-
--- Wait for a finish-like part to appear in the chosen model (StreamingEnabled safe)
-local function waitForFinishPart(mapModel)
-    local elapsed = 0
-    while elapsed < MAX_WAIT_SECS do
-        local candidates = findCandidatesIn(mapModel:GetDescendants(), FINISH_NAMES)
-
-        -- Heuristic: prefer parts on/near the top layer to avoid void TP, then farthest from player
-        if #candidates > 0 then
-            local hrp = safeHRP(LocalPlayer.Character)
-            local mePos = (hrp and hrp.Position) or Vector3.zero
-
-            table.sort(candidates, function(a,b)
-                -- primary sort: distance (farther tends to be the end)
-                local da = (a.Position - mePos).Magnitude
-                local db = (b.Position - mePos).Magnitude
-                if math.abs(da - db) > 5 then
-                    return da > db
-                end
-                -- secondary: higher Y (many ends are elevated / at goal platforms)
-                return a.Position.Y > b.Position.Y
-            end)
-
-            return candidates[1]
-        end
-
-        task.wait(CHECK_INTERVAL)
-        elapsed += CHECK_INTERVAL
-    end
-    return nil
-end
-
-local function tpAbove(part)
-    local char = LocalPlayer.Character
-    local hrp  = safeHRP(char)
-    if not (char and hrp and part and part.CFrame) then return false end
-
-    -- place slightly above to avoid falling through or getting stuck
-    local target = part.CFrame + Vector3.new(0, ABOVE_OFFSET, 0)
-    -- clear ragdoll/fall if possible
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if hum then
-        pcall(function()
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-        end)
-    end
-    hrp.CFrame = target
-    return true
-end
-
--- PUBLIC: call this to go to current map's finish
-local function teleportToMapEnd()
-    local mapModel = getActiveMapModel()
-    if not mapModel then
-        warn("[TP-End] No suitable map model found in Workspace.")
-        return false
-    end
-
-    local finishPart = waitForFinishPart(mapModel)
-    if not finishPart then
-        warn("[TP-End] No finish-like part found in active map within timeout.")
-        return false
-    end
-
-    return tpAbove(finishPart)
-end
-
--- Optional: bind a key to trigger (press P)
-local UserInputService = game:GetService("UserInputService")
-UserInputService.InputBegan:Connect(function(inp, gpe)
-    if gpe then return end
-    if inp.KeyCode == Enum.KeyCode.P then
-        teleportToMapEnd()
-    end
-end)
-
--- You can also call teleportToMapEnd() directly after a small delay:
--- task.delay(1, teleportToMapEnd)
