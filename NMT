@@ -1,23 +1,22 @@
--- =======================================================
+--======================================================
 -- CONFIG
--- =======================================================
+--======================================================
 local KEY_URL = "https://keysite-production.up.railway.app/public/keys.txt"
 local GET_KEY_LINK = "https://loot-link.com/s?gbTnLVac"
 local CACHE_FILE = "LazyDevs_LastKey.txt"
 
--- =======================================================
+--======================================================
 -- SERVICES
--- =======================================================
+--======================================================
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local TeleportService = game:GetService("TeleportService")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local Stats = game:FindFirstChild("Stats")
 
--- =======================================================
+--======================================================
 -- KEY HELPERS
--- =======================================================
+--======================================================
 local function fetchKeys()
     local ok, body = pcall(function() return game:HttpGet(KEY_URL, true) end)
     if not ok or not body then return {} end
@@ -49,14 +48,16 @@ local function readCachedKey()
     return nil
 end
 
--- =======================================================
--- LOAD RAYFIELD
--- =======================================================
+--======================================================
+-- RAYFIELD
+--======================================================
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+assert(Rayfield, "Failed to load Rayfield")
+
 local HubWindow = Rayfield:CreateWindow({
     Name = "Lazy Devs | No More Time Hub",
     LoadingTitle = "Welcome Back",
-    LoadingSubtitle = "Authentication Required",
+    LoadingSubtitle = "Optimized • Secure • Free",
     Theme = "Ocean",
     ToggleUIKeybind = Enum.KeyCode.K,
     KeySystem = false
@@ -64,127 +65,185 @@ local HubWindow = Rayfield:CreateWindow({
 
 local hubLoaded, validateBusy = false, false
 local AbilityManager = {
-    Player  = { SpeedBoost = 16, JumpBoostValue = 50, AirWalk = false, NoClip = false },
-    Game    = { GodMode = false, Fly = false, TrollLoop = false, HelpLoop = false }
+    Player = { WalkSpeed = 16, JumpPower = 50, Fly = false, FlySpeed = 50, NoClip = false, GodMode = false, AntiAFK = false }
 }
 
--- =======================================================
--- UNIVERSAL TELEPORT TO END LOGIC
--- =======================================================
-local FINISH_NAMES = { "finish","end","goal","exit","win" }
-
-local function containsAny(name, list)
-    local n = string.lower(name or "")
-    for _,kw in ipairs(list) do
-        if string.find(n, kw) then return true end
+--======================================================
+-- MOVEMENT HELPERS
+--======================================================
+local noclipConn
+RunService.Heartbeat:Connect(function()
+    if AbilityManager.Player.WalkSpeed and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+        LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed = AbilityManager.Player.WalkSpeed
     end
-    return false
-end
-
-local function safeHRP(char)
-    if not char then return nil end
-    return char:FindFirstChild("HumanoidRootPart")
-end
-
-local function findFinishPart(model)
-    for _,inst in ipairs(model:GetDescendants()) do
-        if inst:IsA("BasePart") and containsAny(inst.Name, FINISH_NAMES) then
-            return inst
-        end
+    if AbilityManager.Player.JumpPower and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+        LocalPlayer.Character:FindFirstChildOfClass("Humanoid").JumpPower = AbilityManager.Player.JumpPower
     end
-end
+end)
 
-local function getActiveMapModel()
-    for _,child in ipairs(workspace:GetChildren()) do
-        if child:IsA("Model") and child:FindFirstChildWhichIsA("BasePart") then
-            local finish = findFinishPart(child)
-            if finish then return child, finish end
-        end
-    end
-end
-
-local function teleportToMapEnd()
-    local char = LocalPlayer.Character
-    local hrp = safeHRP(char)
-    if not hrp then return end
-
-    local mapModel, finishPart = getActiveMapModel()
-    if finishPart then
-        hrp.CFrame = finishPart.CFrame + Vector3.new(0,4,0)
-        Rayfield:Notify({Title="TP",Content="Teleported to End",Duration=3})
-    else
-        Rayfield:Notify({Title="TP",Content="No Finish Found",Duration=3})
-    end
-end
-
--- =======================================================
--- LOAD HUB TABS
--- =======================================================
+--======================================================
+-- HUB TABS
+--======================================================
 local function loadHubTabs()
     if hubLoaded then return end
     hubLoaded = true
 
     -- Info
     local InfoTab = HubWindow:CreateTab("Information")
+    InfoTab:CreateSection("About")
     InfoTab:CreateLabel("Lazy Devs | No More Time Hub")
-    InfoTab:CreateLabel("Developed by Lazy Devs")
+    InfoTab:CreateLabel("Optimized • Secure • Free")
     InfoTab:CreateLabel("Version 1.0.0")
+
+    -- Status
+    local StatusTab = HubWindow:CreateTab("Status")
+    StatusTab:CreateSection("Session")
+    local fpsLabel = StatusTab:CreateLabel("FPS: —")
+    local pingLabel = StatusTab:CreateLabel("Ping: —")
+    StatusTab:CreateLabel("PlaceId: "..tostring(game.PlaceId))
+    local jobLabel = StatusTab:CreateLabel("JobId: "..(tostring(game.JobId) or "—"))
+    -- FPS counter
+    local frames, last = 0, os.clock()
+    RunService.RenderStepped:Connect(function()
+        frames += 1
+        local now = os.clock()
+        if now - last >= 1 then
+            fpsLabel:Set("FPS: "..tostring(math.floor(frames / (now - last))))
+            frames, last = 0, now
+        end
+    end)
+    task.spawn(function()
+        local netstat = Stats and Stats.Network
+        while task.wait(1) do
+            local pingVal = "—"
+            if netstat and netstat.ServerStatsItem then
+                local item = netstat.ServerStatsItem["Data Ping"]
+                if item then
+                    local ok2, str = pcall(function() return item:GetValueString() end)
+                    if ok2 and str then pingVal = str end
+                end
+            end
+            pingLabel:Set("Ping: "..tostring(pingVal))
+            jobLabel:Set("JobId: "..tostring(game.JobId))
+        end
+    end)
 
     -- Player
     local PlayerTab = HubWindow:CreateTab("Player")
-    PlayerTab:CreateSlider({
-        Name = "Speed Boost",
-        Range = {16,150},
-        Increment = 2,
-        CurrentValue = 16,
-        Callback = function(val) AbilityManager.Player.SpeedBoost = val end
-    })
-    PlayerTab:CreateSlider({
-        Name = "Jump Boost",
-        Range = {0,175},
-        Increment = 5,
-        CurrentValue = 50,
-        Callback = function(val) AbilityManager.Player.JumpBoostValue = val end
-    })
-    PlayerTab:CreateToggle({ Name = "AirWalk", CurrentValue = false, Callback = function(v) AbilityManager.Player.AirWalk = v end })
-    PlayerTab:CreateToggle({ Name = "NoClip", CurrentValue = false, Callback = function(v) AbilityManager.Player.NoClip = v end })
 
-    -- Game
-    local GameTab = HubWindow:CreateTab("Game")
-    GameTab:CreateToggle({ Name = "GodMode", CurrentValue = false, Callback = function(v) AbilityManager.Game.GodMode = v end })
-    GameTab:CreateToggle({ Name = "Fly", CurrentValue = false, Callback = function(v) AbilityManager.Game.Fly = v end })
-    GameTab:CreateToggle({ Name = "Troll Players Loop", CurrentValue = false, Callback = function(v) AbilityManager.Game.TrollLoop = v end })
-    GameTab:CreateToggle({ Name = "Help Players Loop", CurrentValue = false, Callback = function(v) AbilityManager.Game.HelpLoop = v end })
-    GameTab:CreateButton({ Name = "Teleport to End", Callback = function() teleportToMapEnd() end })
+    PlayerTab:CreateSection("Movement")
+    PlayerTab:CreateSlider({ Name = "WalkSpeed", Range = {16,200}, Increment = 1, CurrentValue = 16, Callback = function(val) AbilityManager.Player.WalkSpeed = val end })
+    PlayerTab:CreateSlider({ Name = "JumpPower", Range = {50,200}, Increment = 5, CurrentValue = 50, Callback = function(val) AbilityManager.Player.JumpPower = val end })
+    PlayerTab:CreateToggle({ Name = "Fly (UI Button)", CurrentValue = false, Callback = function(v) AbilityManager.Player.Fly = v end })
+    PlayerTab:CreateSlider({ Name = "Fly Speed", Range = {10,200}, Increment = 5, CurrentValue = 50, Callback = function(val) AbilityManager.Player.FlySpeed = val end })
+    PlayerTab:CreateToggle({ Name = "NoClip", CurrentValue = false, Callback = function(v)
+        AbilityManager.Player.NoClip = v
+        if v then
+            noclipConn = RunService.Stepped:Connect(function()
+                if LocalPlayer.Character then
+                    for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+                        if part:IsA("BasePart") then part.CanCollide = false end
+                    end
+                end
+            end)
+        else
+            if noclipConn then noclipConn:Disconnect() end
+        end
+    end })
+
+    PlayerTab:CreateSection("Survivability")
+    PlayerTab:CreateToggle({ Name = "Godmode", CurrentValue = false, Callback = function(v) AbilityManager.Player.GodMode = v end })
+
+    PlayerTab:CreateSection("Utility")
+    PlayerTab:CreateToggle({ Name = "Anti-AFK", CurrentValue = false, Callback = function(v) AbilityManager.Player.AntiAFK = v end })
+    PlayerTab:CreateButton({ Name = "Teleport to Start", Callback = function() Rayfield:Notify({Title="Coming Soon",Content="Start TP logic"}) end })
+    PlayerTab:CreateButton({ Name = "Teleport to End", Callback = function() Rayfield:Notify({Title="Coming Soon",Content="End TP logic"}) end })
+
+    -- Tools
+    local ToolsTab = HubWindow:CreateTab("Tools")
+    ToolsTab:CreateSection("Server")
+    ToolsTab:CreateButton({ Name = "Rejoin", Callback = function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end })
+    ToolsTab:CreateButton({ Name = "Copy Job ID", Callback = function() if setclipboard then setclipboard(game.JobId) end end })
+
+    -- MapTools (Coming Soon)
+    local MapTab = HubWindow:CreateTab("Map Tools")
+    MapTab:CreateSection("Map Utilities")
+    MapTab:CreateLabel("Coming Soon: Start/End detection for all maps")
+
+    -- Theme
+    local ThemeTab = HubWindow:CreateTab("Theme")
+    ThemeTab:CreateSection("Customize")
+    ThemeTab:CreateDropdown({
+        Name = "Theme",
+        Options = {"Ocean","Light","Dark"},
+        CurrentOption = {"Ocean"},
+        Callback = function(opt)
+            HubWindow:SetTheme(opt[1])
+        end
+    })
 end
 
--- =======================================================
+--======================================================
 -- KEY TAB
--- =======================================================
+--======================================================
 local KeyTab = HubWindow:CreateTab("Key")
 KeyTab:CreateSection("Validation")
+
 local statusLabel = KeyTab:CreateLabel("Status: idle")
 local currentKey = readCachedKey() or ""
-KeyTab:CreateInput({ Name = "Enter Key", PlaceholderText = "Paste your key...", CurrentValue = currentKey, Callback = function(text) currentKey = text end })
+
+KeyTab:CreateInput({
+    Name = "Enter Key",
+    PlaceholderText = "Paste your key...",
+    CurrentValue = currentKey,
+    Callback = function(text) currentKey = text end
+})
+
 KeyTab:CreateButton({
     Name = "Validate Key",
     Callback = function()
         if validateBusy or hubLoaded then return end
         validateBusy = true
-        if isValidKey(currentKey) then
+        local key = (currentKey or ""):gsub("^%s+",""):gsub("%s+$","")
+        if key == "" then
+            Rayfield:Notify({ Title = "Key", Content = "Please enter a key.", Duration = 3 })
+            validateBusy = false
+            return
+        end
+        local ok, valid = pcall(isValidKey, key)
+        if ok and valid then
             statusLabel:Set("Status: ✅ Valid")
-            saveCachedKey(currentKey)
+            Rayfield:Notify({ Title = "Key", Content = "Key accepted.", Duration = 3 })
+            saveCachedKey(key)
             loadHubTabs()
-            KeyTab.TabFrame.Visible = false
         else
             statusLabel:Set("Status: ❌ Invalid")
+            Rayfield:Notify({ Title = "Key", Content = "Invalid key.", Duration = 3 })
         end
         validateBusy = false
     end
 })
 
-if currentKey ~= "" and isValidKey(currentKey) then
-    statusLabel:Set("Status: Cached key valid")
-    loadHubTabs()
-    KeyTab.TabFrame.Visible = false
+KeyTab:CreateButton({
+    Name = "Get Key",
+    Callback = function()
+        if setclipboard then
+            setclipboard(GET_KEY_LINK)
+            Rayfield:Notify({ Title = "Get Key", Content = "Link copied to clipboard.", Duration = 3 })
+        else
+            Rayfield:Notify({ Title = "Get Key", Content = GET_KEY_LINK, Duration = 5 })
+        end
+    end
+})
+
+-- Cached check
+do
+    local cached = readCachedKey()
+    if cached and cached ~= "" then
+        local ok, valid = pcall(isValidKey, cached)
+        if ok and valid then
+            statusLabel:Set("Status: Cached key valid")
+            loadHubTabs()
+        end
+    end
 end
